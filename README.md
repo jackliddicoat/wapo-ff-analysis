@@ -1,6 +1,5 @@
 # crime_datasets
-Analysis of two crime datasets with accompanying papers. 
 
-One uses the Mother Jones Mass Shooting Database and the other uses the Washington Post Fatal Force database.
+Analysis of Washington Post Fatal Force database from 2015. Looks at the effect of victim race on the probability that they were unarmed when shot and killed by the police.
 
 UPDATE: I have made a machine learning model using tensorflow that predicts whether a suspect was unarmed with 92% accuracy.
