@@ -1,0 +1,321 @@
+---
+title: "Analysis of the Washington Post Fatal Force Database"
+author: "Jack Liddicoat"
+date: "2024-06-24"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+The packages we will need to load in for this analysis:
+```{r message=FALSE, warning=FALSE}
+library(ggplot2)
+library(tidyverse)
+library(marginaleffects)
+library(patchwork)
+library(lubridate)
+library(mgcv)
+library(readr)
+library(usmap)
+library(stargazer)
+library(multcomp)
+theme_set(theme())
+```
+
+Load in the data
+```{r message=FALSE, warning=FALSE}
+df <- read_csv("polshoot.csv")
+```
+
+```{r}
+df %>% head()
+```
+```{r}
+ps_cleaned <- df %>% 
+  mutate(body_camera = ifelse(body_camera == "TRUE", "yes", "no")) %>% 
+  mutate(signs_of_mental_illness = ifelse(signs_of_mental_illness == "TRUE", "yes", "no")) %>% 
+  mutate(date = as.Date(date, "%m/%d/%y")) %>% 
+  mutate(week_no = isoweek(date))
+glimpse(ps_cleaned)
+```
+
+# Exploration
+
+We can look at the demographic statistics and visualize them via ggplot2.
+
+```{r warning=FALSE}
+gender <- ps_cleaned %>%
+  count(gender) %>% 
+  ggplot(aes(gender, n, fill = gender)) +
+  geom_bar(stat = "identity", show.legend = F)
+race <- ps_cleaned %>%
+  count(race) %>% 
+  mutate(race = fct_reorder(race, -n)) %>% 
+  ggplot(aes(race, n, fill = race)) +
+  geom_bar(stat = "identity", show.legend = F) +
+  theme(axis.text.x = element_text(hjust = .5, angle = 30))
+age <- ps_cleaned %>% 
+  ggplot() +
+  geom_histogram(aes(age), fill = "blue")
+states <- ps_cleaned %>% # just going to pick the 10 most highest
+  count(state) %>% 
+  arrange(desc(n)) %>% 
+  head(10) %>% 
+  mutate(state = fct_reorder(state, -n)) %>% 
+  ggplot(aes(state, n, fill = state)) +
+  geom_bar(stat = "identity", show.legend = F)
+
+gender + age + race + states
+```
+
+We can conclude that most people who were shot and killed by the police in 2015 were male,
+they skewed younger in age, they were mostly white (though adjusted for population size were
+more likely to be black or Hispanic), and most shootings occured in the most populus states, with some exceptions (e.g., Arizona, Oklahoma, Colorado).
+
+We can make a map of the U.S. to better visualize the distribution of police killings. Note that this is **not per-capita**, so it largely reflects differences in population.
+
+```{r}
+map_data <- ps_cleaned %>% 
+  count(state)
+plot_usmap(regions = "state", values = "n", data = map_data) +
+  scale_fill_continuous(low = "lightblue", high = "darkred")
+```
+
+
+From here, we can ask more questions. How does race interact with age? How does gender interact with age? Are there differences in the circumstances of police shootings for these different variables?
+
+Here is what the plots of gender and age looks like.
+```{r warning=FALSE}
+gender_density <- ps_cleaned %>% 
+  ggplot() +
+  geom_density(aes(age, fill = gender), show.legend = F) +
+  facet_wrap(~gender)
+gender_box <- ps_cleaned %>% 
+  ggplot() +
+  geom_boxplot(aes(gender, age, fill = gender), show.legend = F)
+gender_density + gender_box
+
+```
+
+It does appear as if men tend to skew a bit younger than women. We can check this using some summary statistics.
+
+
+```{r}
+tbl <- ps_cleaned %>% 
+  filter(!is.na(gender), !is.na(age)) %>% 
+  group_by(gender) %>% 
+  summarise(`25th Percentile` = quantile(age, .25),
+            Median = median(age),
+            `75th Percentile` = quantile(age, .75))
+tbl
+```
+
+They are very similar in age. We can now see if different racial groups also have similar age distributions.
+
+```{r warning=FALSE}
+ps_cleaned %>% 
+  ggplot() +
+  geom_boxplot(aes(race, age, fill = race), show.legend = F)
+```
+
+On its face, it seems like whites and Asians are significantly older than blacks, Hispanics, and Native Americans. We can do an ANOVA to test if there is a significant difference in age between the racial groups.
+
+```{r}
+ps_cleaned$race <- as.factor(ps_cleaned$race)
+res_aov <- aov(age ~ race, data = ps_cleaned)
+summary(res_aov)
+```
+From the test, we can see that our F-statistic is highly significant (F = 20.69, p < .001). Hence, we reject the null hypothesis that the age of the victims is the same between the 6 groups, meaning at least one group is different. However, we should check if that still holds true assuming unequal variances. We will proceed with Welch's test:
+
+```{r}
+oneway.test(age ~ race,
+  data = ps_cleaned,
+  var.equal = FALSE)
+```
+Our F-statistic dropped a tad bit (from 20.69 to 17.98), but we still reject the null hypothesis stated above. We can see the difference between pairs if we run a Tukey HSD test.
+
+```{r}
+tukey_test <- glht(res_aov,
+  linfct = mcp(race = "Tukey")
+)
+summary(tukey_test)
+```
+
+There is a lot of stuff to go through here. However, the linear hypothesis tells us, rather intuitively, that we are assuming the difference between the age of groups are the same, our t-scores and corresponding p-values inform us to fail to reject or reject that hypothesis. A few things of note: white victims are nearly 8 years older than black victims and roughly 6 years older than Hispanic victims, there is no statistically significant difference between white and Asian victims.
+
+
+Lets look at the circumstances of the shootings by race. Firstly, lets look at who the distrubutions of weapons by race, age, and sex. 
+
+```{r}
+ps_cleaned %>%
+  filter(!is.na(armed)) %>% 
+  count(race, armed, sort = T) %>%
+  mutate(race = fct_reorder(race, -n)) %>% 
+  ggplot(aes(race, n, fill = armed)) +
+  geom_bar(stat = "identity") +
+  theme(axis.text.x = element_text(angle = 30, hjust = 1))
+```
+
+```{r}
+ps_cleaned %>%
+  filter(!is.na(armed)) %>% 
+  count(gender, armed) %>%
+  ggplot(aes(gender, n, fill = armed)) +
+  geom_bar(stat = "identity") +
+  theme(axis.text.x = element_text(angle = 30, hjust = 1))
+```
+
+
+It may be more helpful to make an area plot for the age variable.
+
+```{r}
+ps_cleaned %>%
+  filter(!is.na(armed), !is.na(age)) %>% 
+  mutate(bin_age = cut_width(age, 15, boundary = 0)) %>% 
+  count(bin_age, armed) %>% 
+  group_by(bin_age) %>% 
+  mutate(pct = n/sum(n)) %>% 
+  ggplot(aes(x = bin_age, y = pct, fill = armed)) +
+  geom_bar(stat = "identity")
+```
+
+We can see that the proportion of people who were unarmed when shot and killed by the police decreases as a function of age. We can just make the armed very binary to see this more clearly.
+
+```{r}
+ps_cleaned %>%
+  filter(!is.na(armed), !is.na(age)) %>% 
+  mutate(status = ifelse(armed == "unarmed", "unarmed", "armed")) %>% 
+  ggplot() +
+  geom_histogram(aes(age, fill = status))
+```
+
+
+I want to know how shootings look over the course of the year. To do that, we can create a variable which groups the dates into weeks (which we have already done).
+
+```{r}
+
+ps_cleaned %>% 
+  count(week_no) %>% 
+  ggplot(aes(week_no, n)) +
+  geom_line() +
+  geom_point()
+```
+
+As can be seen in the graph, shootings tend to be a bit higher in the summer, but the increase is not too dramatic. We can look at how this differs by race. Let's just look at whites, blacks, and Hispanics to make the graph easier to read.
+
+```{r}
+weekly <- ps_cleaned %>%
+  filter(race %in% c("Black", "White", "Hispanic")) %>% 
+  count(week_no, race) %>% 
+  group_by(race) %>% 
+  ggplot(aes(week_no, n, color = race)) +
+  geom_line()
+cumulative <- ps_cleaned %>%
+  filter(race %in% c("Black", "White", "Hispanic")) %>% 
+  count(week_no, race) %>% 
+  group_by(race) %>% 
+  mutate(cum_n = cumsum(n)) %>% 
+  ggplot(aes(week_no, cum_n, color = race)) +
+  geom_line(show.legend = F)
+
+weekly / cumulative
+```
+
+Looks pretty similar for each race, although you could argue that blacks and whites experience a higher relative victimization in the summer compared to Hispanics.
+
+# Regression Analysis
+
+For our regression analysis, we will just make the race and the gun variable binary. Since we are mostly interested in **unarmed** shootings, we can just make a binary variable for unarmed in each of these.
+
+```{r}
+reg_data <- ps_cleaned %>%
+  mutate(race = ifelse(race == "Black", 1, 0),
+         unarmed = ifelse(armed == "unarmed", 1, 0),
+         body_camera = ifelse(body_camera == "yes", 1, 0),
+         flee = ifelse(flee == "not", 0, 1),
+         signs_of_mental_illness = ifelse(signs_of_mental_illness == "yes", 1, 0))
+```
+
+For the first regression, we are going to see how race affects the probability the suspect was armed. The regression equation is as follows:
+
+$$ln(\frac{p(unarmed)}{1-p(unarmed)}) = \beta_0 + \beta_1race$$
+
+```{r}
+glm1 <- glm(unarmed ~ race, data = reg_data, family = binomial)
+```
+
+```{r, results='asis'}
+stargazer(glm1,
+          title = "Regression to Examine Effect of Race on Probability Unarmed",
+          header = F)
+```
+
+We can see that the coefficient is positive and statistically significant (p < .01). We estimate that, without controls, that blacks have 2.12 times higher odds of being unarmed when shot and killed by the police compared to non-blacks.
+
+For our second regression equation, we can look at the effect of age on being unarmed and plot its effects using plot_predictions() from marginaleffects. Our regression equation is:
+
+$$ln(\frac{p(unarmed)}{1-p(unarmed)}) = \beta_0 + \beta_1age$$
+
+```{r}
+glm2 <- glm(unarmed ~ age, data = reg_data, family = binomial)
+```
+
+```{r, results='asis'}
+stargazer(glm2,
+          title = "Regression to Examine Effect of Age on Probability Unarmed",
+          header = F)
+```
+
+```{r}
+plot_predictions(glm2, condition = "age")
+```
+
+From both the regression and the plot, we can see that age definitely decreases the probability that the victim is unarmed. The estimate from the logistic regression is that a 10-year increase in age decreases the odds that a victim is unarmed by 32%.
+
+In the next regression, I will look at the effect of age and race on the probability that a victim was unarmed. The regression equation will be:
+
+$$ln(\frac{p(unarmed)}{1-p(unarmed)}) = \beta_0 + \beta_1race + \beta_2race + \beta_2race*age$$
+
+To simplify the effect of age in the regression, I will center the data at the median age of a victim in the database.
+
+```{r}
+glm3 <- reg_data %>% 
+  filter(!is.na(age)) %>% 
+  mutate(age = (age - median(age))) %>% 
+  glm(unarmed ~ race*age, data = ., family = binomial)
+```
+
+```{r, results='asis'}
+stargazer(glm3,
+          title = "Regression to Examine Effect of Race and Age on Probability Unarmed",
+          header = F)
+```
+
+The result of the regression is interesting. Controlling for age, blacks are still have 1.97 times higher odds (p < .01) of being unarmed when shot and killed by the police. However, we can see that, for non-blacks, a one-year increase in age decreases the odds of them being unarmed by ~5%, whereas the *opposite* is true for black victims.
+
+The next regression uses all of the variables in the data set, besides state an city, which cause overfitting in the model, the second equation uses the interaction terms as well. The equations are:
+
+(1)
+$$ln(\frac{p(unarmed)}{1-p(unarmed)}) = \beta_0 + \beta_1race + \beta_2age + \beta_2flee + \beta_3bodycamera + \beta_4mentallillness$$
+(2)
+$$ln(\frac{p(unarmed)}{1-p(unarmed)}) = \beta_0 + \beta_1race + \beta_2age + \beta_2flee + \beta3bodycamera + \beta_4race*age + \beta_5race*flee +
+\beta_6race*bodycamera + \beta_7race*mentalillness$$
+
+```{r}
+glm4 <- reg_data %>% 
+  filter(!is.na(age)) %>% 
+  mutate(age = (age - median(age))) %>%
+  glm(unarmed ~ race + age + flee + body_camera + signs_of_mental_illness, data = ., family = binomial)
+glm5 <- reg_data %>% 
+  filter(!is.na(age)) %>% 
+  mutate(age = (age - median(age))) %>%
+  glm(unarmed ~ race*age + race*flee + race*body_camera + race*signs_of_mental_illness, data = ., family = binomial)
+```
+
+```{r results='asis'}
+stargazer(glm4,
+          glm5,
+          title = "Regression to Estimate the Effect of Several Factors on Probability Unarmed",
+          header = F)
+```
+The results of this regression suggest that age still has a very strong *negative* effect on the probability the suspect was unarmed, but only for non-black victims. The officer having a body camera increases the chances that the victim is unarmed, but this only applies to non-black victims, as the interaction term is not statistically significant. However, while having a mental illness does not increase the probability of being unarmed for non-black victims, it strongly increases the risk for black victims (OR = 3.97, p < .01).
